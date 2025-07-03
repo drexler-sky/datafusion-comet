@@ -43,6 +43,8 @@ use std::{fmt::Debug, hash::Hash, sync::Arc};
 use url::Url;
 
 use super::objectstore;
+use super::objectstore::jni::JniObjectStore;
+use datafusion::execution::context::SessionContext;
 
 // This file originates from cast.rs. While developing native scan support and implementing
 // SparkSchemaAdapter we observed that Spark's type conversion logic on Parquet reads does not
@@ -367,6 +369,11 @@ pub(crate) fn prepare_object_store_with_configs(
     url: String,
     object_store_configs: &HashMap<String, String>,
 ) -> Result<(ObjectStoreUrl, Path), ExecutionError> {
+    let use_jni_s3 = object_store_configs
+        .get("use_jni_s3")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
     let mut url = Url::parse(url.as_str())
         .map_err(|e| ExecutionError::GeneralError(format!("Error parsing URL {url}: {e}")))?;
     let mut scheme = url.scheme();
@@ -384,6 +391,11 @@ pub(crate) fn prepare_object_store_with_configs(
 
     let (object_store, object_store_path): (Box<dyn ObjectStore>, Path) = if scheme == "hdfs" {
         parse_hdfs_url(&url)
+    } else if scheme == "s3" && use_jni_s3 {
+        Ok((
+            Box::new(JniObjectStore::new(object_store_configs.clone())) as Box<dyn ObjectStore>,
+            Path::from(url.path()),
+        ))
     } else if scheme == "s3" {
         objectstore::s3::create_store(&url, object_store_configs, Duration::from_secs(300))
     } else {
@@ -406,6 +418,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
     use url::Url;
+    use crate::parquet::objectstore::jni::JniObjectStore;
 
     /// Parses the url, registers the object store, and returns a tuple of the object store url and object store path
     pub(crate) fn prepare_object_store(
@@ -476,4 +489,33 @@ mod tests {
         assert_eq!(res.0, expected.0);
         assert_eq!(res.1, expected.1);
     }
+
+    #[test]
+    fn test_use_jni_s3_flag() {
+        use crate::parquet::parquet_support::prepare_object_store_with_configs;
+        use datafusion::execution::runtime_env::RuntimeEnv;
+        use object_store::path::Path;
+        use datafusion::execution::object_store::ObjectStoreUrl;
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let runtime_env = Arc::new(RuntimeEnv::default());
+
+        let s3_url = "s3://my-bucket/path/to/file.parquet".to_string();
+
+        let mut config = HashMap::new();
+        config.insert("use_jni_s3".to_string(), "true".to_string());
+
+        let result = prepare_object_store_with_configs(runtime_env.clone(), s3_url.clone(), &config)
+            .expect("Should succeed");
+
+        let expected_url = ObjectStoreUrl::parse("s3://my-bucket").unwrap();
+        let expected_path = Path::from("/path/to/file.parquet");
+
+        assert_eq!(result.0, expected_url);
+        assert_eq!(result.1, expected_path);
+    }
+
+
+
 }

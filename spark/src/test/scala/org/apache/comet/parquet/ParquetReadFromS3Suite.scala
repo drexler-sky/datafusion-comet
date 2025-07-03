@@ -26,6 +26,8 @@ import scala.util.Try
 import org.testcontainers.containers.MinIOContainer
 import org.testcontainers.utility.DockerImageName
 
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.Path
 import org.apache.spark.SparkConf
 import org.apache.spark.sql.CometTestBase
 import org.apache.spark.sql.SaveMode
@@ -34,8 +36,11 @@ import org.apache.spark.sql.comet.CometScanExec
 import org.apache.spark.sql.execution.adaptive.AdaptiveSparkPlanHelper
 import org.apache.spark.sql.functions.{col, sum}
 
+import org.apache.comet.NativeBase
+
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
+import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.s3.S3Client
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest
 import software.amazon.awssdk.services.s3.model.HeadBucketRequest
@@ -72,6 +77,7 @@ class ParquetReadFromS3Suite extends CometTestBase with AdaptiveSparkPlanHelper 
     conf.set("spark.hadoop.fs.s3a.secret.key", password)
     conf.set("spark.hadoop.fs.s3a.endpoint", minioContainer.getS3URL)
     conf.set("spark.hadoop.fs.s3a.path.style.access", "true")
+    conf.set("spark.comet.scan.impl", "native_datafusion")
   }
 
   private def createBucketIfNotExists(bucketName: String): Unit = {
@@ -79,6 +85,7 @@ class ParquetReadFromS3Suite extends CometTestBase with AdaptiveSparkPlanHelper 
     val s3Client = S3Client
       .builder()
       .endpointOverride(URI.create(minioContainer.getS3URL))
+      .region(Region.US_EAST_1)
       .credentialsProvider(StaticCredentialsProvider.create(credentials))
       .forcePathStyle(true)
       .build()
@@ -100,6 +107,20 @@ class ParquetReadFromS3Suite extends CometTestBase with AdaptiveSparkPlanHelper 
   private def writeTestParquetFile(filePath: String): Unit = {
     val df = spark.range(0, 1000)
     df.write.format("parquet").mode(SaveMode.Overwrite).save(filePath)
+    println(
+      "Written files: " + spark.read
+        .parquet("s3a://test-bucket/data/test-file-jni.parquet")
+        .inputFiles
+        .mkString("\n"))
+    val files = spark.read.parquet(filePath).inputFiles
+    files.foreach { file =>
+      println(s"Found file: $file")
+      val path = new org.apache.hadoop.fs.Path(file)
+      val fs = path.getFileSystem(spark.sparkContext.hadoopConfiguration)
+      val len = fs.getFileStatus(path).getLen
+      println(s"Length: $len bytes")
+    }
+
   }
 
   test("read parquet file from MinIO") {
@@ -118,4 +139,24 @@ class ParquetReadFromS3Suite extends CometTestBase with AdaptiveSparkPlanHelper 
 
     assert(df.first().getLong(0) == 499500)
   }
+
+  test("Comet uses JNI object store when use_jni_s3 is true") {
+
+    val testFilePath = s"s3a://$testBucketName/data/test-file-jni.parquet"
+
+    writeTestParquetFile(testFilePath)
+
+    spark.conf.set("spark.comet.s3.use_jni_object_store", "true")
+
+    val df = spark.read.format("parquet").load(testFilePath)
+
+    val scans = collect(df.queryExecution.executedPlan) { case p: CometNativeScanExec =>
+      p
+    }
+
+    assert(scans.nonEmpty, "Expected CometNativeScanExec to be used")
+    assert(scans.size == 1)
+    df.show()
+  }
+
 }

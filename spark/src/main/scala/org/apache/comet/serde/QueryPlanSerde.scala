@@ -50,6 +50,7 @@ import org.apache.spark.sql.types._
 import org.apache.spark.unsafe.types.UTF8String
 
 import org.apache.comet.CometConf
+import org.apache.comet.CometConf.COMET_S3_USE_JNI_OBJECT_STORE
 import org.apache.comet.CometSparkSessionExtensions.{isCometScan, withInfo}
 import org.apache.comet.expressions._
 import org.apache.comet.objectstore.NativeConfig
@@ -2284,8 +2285,13 @@ object QueryPlanSerde extends Logging with CometExprShim {
           val hadoopConf = scan.relation.sparkSession.sessionState
             .newHadoopConfWithOptions(scan.relation.options)
           firstPartition.foreach { partitionFile =>
-            val objectStoreOptions =
+            val baseOptions =
               NativeConfig.extractObjectStoreOptions(hadoopConf, partitionFile.pathUri)
+
+            val useJniS3 =
+              COMET_S3_USE_JNI_OBJECT_STORE.get(scan.relation.sparkSession.sessionState.conf)
+            val objectStoreOptions = baseOptions.updated("use_jni_s3", useJniS3.toString)
+
             objectStoreOptions.foreach { case (key, value) =>
               nativeScanBuilder.putObjectStoreOptions(key, value)
             }

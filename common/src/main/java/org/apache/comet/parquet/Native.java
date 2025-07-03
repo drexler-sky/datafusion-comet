@@ -19,7 +19,9 @@
 
 package org.apache.comet.parquet;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Map;
 
 import org.apache.comet.NativeBase;
@@ -292,4 +294,65 @@ public final class Native extends NativeBase {
    * @param handle
    */
   public static native void closeRecordBatchReader(long handle);
+
+  // TODO: pass Map<String, String> configs
+  public static byte[] read(String path, long offset, int len) {
+    try {
+      org.apache.hadoop.fs.Path p = new org.apache.hadoop.fs.Path(path);
+      org.apache.hadoop.fs.FileSystem fs =
+          p.getFileSystem(new org.apache.hadoop.conf.Configuration());
+
+      long fileLen = fs.getFileStatus(p).getLen();
+
+      if (offset > fileLen) {
+        throw new IOException(
+            "Offset beyond file length: offset=" + offset + ", fileLen=" + fileLen);
+      }
+
+      // Clip len if it goes beyond file size
+      if (offset + len > fileLen) {
+        System.out.println("Clipping len from " + len + " to " + (fileLen - offset));
+        len = (int) (fileLen - offset);
+      }
+
+      org.apache.hadoop.fs.FSDataInputStream inputStream = fs.open(p);
+
+      System.out.println("Java read(): path=" + path + ", offset=" + offset + ", len=" + len);
+      inputStream.seek(offset);
+      byte[] buffer = new byte[len];
+      int totalBytesRead = 0;
+      while (totalBytesRead < len) {
+        int read = inputStream.read(buffer, totalBytesRead, len - totalBytesRead);
+        if (read == -1) break;
+        totalBytesRead += read;
+      }
+      inputStream.close();
+
+      if (offset + len >= fileLen - 8) {
+        System.out.println("Dumping last 32 bytes (footer area):");
+        for (int i = len - 32; i < len; ++i) {
+          System.out.printf("%02x ", buffer[i]);
+        }
+        System.out.println();
+      }
+
+      return totalBytesRead < len ? Arrays.copyOf(buffer, totalBytesRead) : buffer;
+
+    } catch (Exception e) {
+      System.err.println("Native.read failed: " + e);
+      return null;
+    }
+  }
+
+  public static long getLength(String path) {
+    try {
+      org.apache.hadoop.fs.Path p = new org.apache.hadoop.fs.Path(path);
+      org.apache.hadoop.fs.FileSystem fs =
+          p.getFileSystem(new org.apache.hadoop.conf.Configuration());
+      return fs.getFileStatus(p).getLen();
+    } catch (Exception e) {
+      System.err.println("Native.getLength failed: " + e);
+      return -1;
+    }
+  }
 }

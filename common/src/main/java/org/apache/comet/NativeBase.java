@@ -104,6 +104,8 @@ public abstract class NativeBase {
     }
   }
 
+  public static native void initJvm();
+
   /**
    * Use the bundled native libraries. Functionally equivalent to <code>System.loadLibrary</code>.
    */
